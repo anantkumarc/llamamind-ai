@@ -47,9 +47,12 @@ def resolve_model_name(client: Groq) -> str:
         if candidate in available_models:
             return candidate
 
+    excluded = ("guard", "whisper", "tts", "safeguard", "embed")
     for model_id in available_models:
         lowered = model_id.lower()
-        if "llama" in lowered or "meta-llama" in lowered or "gpt-oss" in lowered:
+        if any(word in lowered for word in excluded):
+            continue
+        if "llama" in lowered or "gpt-oss" in lowered:
             return model_id
 
     raise RuntimeError(

@@ -49,19 +49,6 @@ You can also run `.venv/bin/Friday` without activating the environment, or use
 
 LlamaMind applies one system instruction to every conversation. Responses are expected to lead with the direct answer, use Markdown structure only when it improves readability, preserve relevant conversation context, distinguish uncertainty from established facts, and provide concise but complete technical guidance. API and stream interruptions are reported in the terminal and do not get added to conversation history.
 
-## Testing
 
-Run the mocked unit tests without making an API request:
 
-```bash
-python -m unittest discover -v
-```
 
-## Model handling
-
-The app no longer assumes a fixed Groq model name. It tries the configured `GROQ_MODEL` value first, then checks the current Groq model catalog and picks the first compatible Llama or GPT-OSS option. If no compatible model is available, the app exits with a clear error instead of repeatedly retrying a dead model ID.
-
-## Notes
-
-- Never commit your `.env` file or Groq key.
-- `GROQ_API_KEY` should be stored in the environment or a local `.env` file only.

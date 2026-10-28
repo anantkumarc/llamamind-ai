@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from rich.console import Console
+import time
+
+from rich import box
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
+from rich.table import Table
 from rich.text import Text
 
 SYSTEM_PROMPT = """You are LlamaMind AI. Deliver accurate, useful answers to the user's question in the requested context.
@@ -20,7 +24,24 @@ Response rules:
 - Do not invent facts, files, APIs, commands, or outcomes. State uncertainty explicitly and use qualifiers only when uncertainty is real. Never claim an uncertain fix has been verified.
 - Do not expose secrets or API keys. Warn before destructive actions or meaningful security risks.
 - Provide concise explanations and conclusions, not hidden reasoning or internal chain-of-thought.
-- Follow user formatting requirements unless they conflict with these rules."""
+- Follow user formatting requirements unless they conflict with these rules.
+
+Default answer shape (adapt it; skip sections that add nothing):
+1. One or two sentences with the direct answer.
+2. The details: short bullets or numbered steps, or a fenced code block with a language tag.
+3. Only if useful: a short "Notes" line for pitfalls, assumptions, or how to verify.
+For simple or conversational questions, reply in plain sentences with no headings or bullets."""
+
+
+EXIT_COMMANDS = {"/exit", "/quit", "quit", "exit"}
+MAX_PANEL_WIDTH = 100
+
+COMMANDS = [
+    ("/help", "Show this list of commands"),
+    ("/model", "Show the model in use"),
+    ("/clear", "Clear the screen and start a fresh conversation"),
+    ("/exit", "Quit (Ctrl+C also works)"),
+]
 
 
 class LlamaMindChat:
@@ -30,6 +51,8 @@ class LlamaMindChat:
         self.console = Console()
         self.history: list[dict[str, str]] = []
 
+    # ---- request -----------------------------------------------------
+
     def _build_messages(self, user_message: str) -> list[dict[str, str]]:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         for entry in self.history:
@@ -37,73 +60,187 @@ class LlamaMindChat:
         messages.append({"role": "user", "content": user_message})
         return messages
 
+    def _generation_options(self) -> dict:
+        options: dict = {"temperature": 0.3, "max_tokens": 2048}
+        # Only GPT-OSS models accept reasoning_effort; other models reject it.
+        if "gpt-oss" in self.model_name.lower():
+            options["reasoning_effort"] = "medium"
+        return options
+
+    # ---- rendering ---------------------------------------------------
+
+    def _panel_width(self) -> int:
+        return min(self.console.width, MAX_PANEL_WIDTH)
+
+    def _answer_panel(self, text: str, elapsed: float | None = None) -> Panel:
+        subtitle = Text(self.model_name, style="dim")
+        if elapsed is not None:
+            subtitle.append(f" \u00b7 {elapsed:.1f}s")
+        return Panel(
+            Markdown(text),
+            title=Text("LlamaMind AI", style="bold cyan"),
+            title_align="left",
+            subtitle=subtitle,
+            subtitle_align="right",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+            width=self._panel_width(),
+        )
+
+    def _print_banner(self) -> None:
+        details = Group(
+            Text("LlamaMind AI", style="bold cyan"),
+            Text("Cloud-powered terminal assistant", style="dim"),
+            Text(),
+            Text.assemble(("Model  ", "dim"), (self.model_name, "green")),
+            Text.assemble(
+                ("Tips   ", "dim"),
+                ("/help", "bold"),
+                (" for commands \u00b7 ", "dim"),
+                ("/exit", "bold"),
+                (" to quit", "dim"),
+            ),
+        )
+        self.console.print(
+            Panel(
+                details,
+                border_style="cyan",
+                box=box.ROUNDED,
+                padding=(1, 2),
+                width=self._panel_width(),
+            )
+        )
+        self.console.print()
+
+    def _print_help(self) -> None:
+        table = Table(box=None, show_header=False, padding=(0, 2))
+        table.add_column(style="bold cyan", no_wrap=True)
+        table.add_column(style="dim")
+        for command, description in COMMANDS:
+            table.add_row(command, description)
+        self.console.print(
+            Panel(
+                table,
+                title="Commands",
+                title_align="left",
+                border_style="blue",
+                box=box.ROUNDED,
+                width=self._panel_width(),
+            )
+        )
+        self.console.print()
+
+    # ---- streaming ---------------------------------------------------
+
     def _stream_response(self, user_message: str) -> str:
         messages = self._build_messages(user_message)
+        started = time.perf_counter()
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=messages,
-            temperature=0.4,
-            frequency_penalty=0.25,
-            presence_penalty=0.25,
             stream=True,
+            **self._generation_options(),
         )
 
         full_text: list[str] = []
-        with Live(
-            Markdown(""),
-            console=self.console,
-            refresh_per_second=12,
-            transient=True,
-            vertical_overflow="crop",
-        ) as live:
+        status = self.console.status("[cyan]Thinking...[/cyan]", spinner="dots")
+        status.start()
+        live = None
+        try:
             for chunk in response:
+                if not chunk.choices:
+                    continue
                 delta = getattr(chunk.choices[0].delta, "content", None)
-                if delta:
-                    full_text.append(delta)
-                    live.update(Markdown("".join(full_text)))
+                if not delta:
+                    continue
+                if live is None:
+                    # Swap the spinner for the live answer on the first token.
+                    status.stop()
+                    live = Live(
+                        self._answer_panel(""),
+                        console=self.console,
+                        refresh_per_second=12,
+                        transient=True,
+                        vertical_overflow="crop",
+                    )
+                    live.start()
+                full_text.append(delta)
+                live.update(self._answer_panel("".join(full_text)))
+        finally:
+            status.stop()
+            if live is not None:
+                live.stop()
 
         answer = "".join(full_text)
-        self.console.print(Markdown(answer))
+        if not answer.strip():
+            raise RuntimeError("The model returned an empty response.")
+
+        elapsed = time.perf_counter() - started
+        self.console.print(self._answer_panel(answer, elapsed))
+        self.console.print()
         return answer
 
+    # ---- main loop ---------------------------------------------------
+
     def run(self) -> None:
-        self.console.print(
-            Panel.fit(
-                "[bold cyan]LlamaMind AI[/bold cyan]\n"
-                "[bold]Cloud-powered terminal assistant[/bold]\n"
-                f"Model: {self.model_name}",
-                title="LLAMAMIND AI",
-                border_style="cyan",
-            )
-        )
+        self._print_banner()
 
         while True:
             try:
-                user_input = Prompt.ask("You")
+                user_input = Prompt.ask("[bold blue]You[/bold blue]", console=self.console)
             except EOFError:
                 self.console.print("\nInput stream closed. Goodbye!", style="bold yellow")
                 break
-            if user_input.strip().lower() in {"/exit", "/quit", "quit", "exit"}:
+            except KeyboardInterrupt:
+                self.console.print("\nGoodbye!", style="bold yellow")
+                break
+
+            text = user_input.strip()
+            command = text.lower()
+            if not text:
+                continue
+            if command in EXIT_COMMANDS:
                 self.console.print("Goodbye!", style="bold yellow")
                 break
-            if user_input.strip().lower() == "/model":
+            if command == "/help":
+                self._print_help()
+                continue
+            if command == "/model":
                 self.console.print(f"Using model: {self.model_name}", style="bold green")
+                self.console.print()
+                continue
+            if command == "/clear":
+                self.history = []
+                self.console.clear()
+                self._print_banner()
+                continue
+            if text.startswith("/") and " " not in text:
+                self.console.print(
+                    f"Unknown command {text}. Type /help to see what is available.",
+                    style="yellow",
+                    markup=False,
+                )
+                self.console.print()
                 continue
 
             self.console.print()
-            self.console.print(Text.assemble(("You\n", "bold blue"), (user_input, "blue")))
-            self.console.print(Text("LlamaMind AI", style="bold cyan"))
             try:
-                answer = self._stream_response(user_message=user_input)
+                answer = self._stream_response(user_message=text)
+            except KeyboardInterrupt:
+                self.console.print("\nResponse cancelled.", style="yellow")
+                self.console.print()
+                continue
             except Exception as exc:
                 self.console.print(
                     f"\nUnable to complete the response: {exc}",
                     style="bold red",
                     markup=False,
                 )
+                self.console.print()
                 continue
 
-            self.history.append({"role": "user", "content": user_input})
+            self.history.append({"role": "user", "content": text})
             self.history.append({"role": "assistant", "content": answer})
 
             if len(self.history) > 12:

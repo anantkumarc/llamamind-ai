@@ -73,9 +73,11 @@ class LlamaMindChatTests(unittest.TestCase):
         self.assertEqual(answer, "## Result\n- direct")
         request = chat.client.chat.completions.calls[0]
         self.assertEqual(request["model"], "test-model")
-        self.assertEqual(request["temperature"], 0.4)
-        self.assertEqual(request["frequency_penalty"], 0.25)
-        self.assertEqual(request["presence_penalty"], 0.25)
+        self.assertEqual(request["temperature"], 0.3)
+        self.assertEqual(request["max_tokens"], 2048)
+        self.assertNotIn("frequency_penalty", request)
+        self.assertNotIn("presence_penalty", request)
+        self.assertNotIn("reasoning_effort", request)
         self.assertTrue(request["stream"])
         live_options = live_class.call_args.kwargs
         self.assertEqual(live_options["vertical_overflow"], "crop")
@@ -86,6 +88,14 @@ class LlamaMindChatTests(unittest.TestCase):
             "role": "user",
             "content": "Which is more portable?",
         })
+
+    def test_gpt_oss_models_get_reasoning_effort(self):
+        chat = self.make_chat(chunks=[chunk("ok")])
+        chat.model_name = "openai/gpt-oss-120b"
+        with patch("llamamind_ai.app.Live"):
+            chat._stream_response("hi")
+        request = chat.client.chat.completions.calls[0]
+        self.assertEqual(request["reasoning_effort"], "medium")
 
     def test_history_is_trimmed_to_last_twelve_messages(self):
         chat = self.make_chat(chunks=[chunk("Next answer")])
@@ -105,8 +115,10 @@ class LlamaMindChatTests(unittest.TestCase):
             {"role": "assistant", "content": "Next answer"},
         ])
         output = chat.console.file.getvalue()
-        self.assertIn("You\nfollow-up", output)
+        self.assertIn("Next answer", output)
         self.assertIn("LlamaMind AI", output)
+        # The typed message is no longer echoed back a second time.
+        self.assertNotIn("follow-up", output)
 
     def test_interrupted_stream_is_reported_and_not_saved(self):
         chat = self.make_chat()
@@ -124,6 +136,51 @@ class LlamaMindChatTests(unittest.TestCase):
         self.assertIn("Unable to complete the response: connection interrupted", output)
         self.assertEqual(chat.history, [])
         self.assertFalse(original_stream is interrupted_stream)
+
+    def test_help_and_unknown_commands_do_not_call_the_model(self):
+        chat = self.make_chat()
+        with patch(
+            "llamamind_ai.app.Prompt.ask",
+            side_effect=["/help", "/bogus", "   ", "/quit"],
+        ):
+            chat.run()
+
+        output = chat.console.file.getvalue()
+        self.assertIn("Commands", output)
+        self.assertIn("/clear", output)
+        self.assertIn("Unknown command /bogus", output)
+        self.assertEqual(chat.client.chat.completions.calls, [])
+        self.assertEqual(chat.history, [])
+
+    def test_clear_resets_history(self):
+        chat = self.make_chat()
+        chat.history = [
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "older"},
+        ]
+        with patch("llamamind_ai.app.Prompt.ask", side_effect=["/clear", "/quit"]):
+            chat.run()
+        self.assertEqual(chat.history, [])
+
+    def test_empty_model_response_is_reported_and_not_saved(self):
+        chat = self.make_chat(chunks=[])
+        with patch("llamamind_ai.app.Prompt.ask", side_effect=["hello", "/quit"]):
+            chat.run()
+        output = chat.console.file.getvalue()
+        self.assertIn("The model returned an empty response.", output)
+        self.assertEqual(chat.history, [])
+
+    def test_ctrl_c_during_response_cancels_without_saving(self):
+        chat = self.make_chat()
+
+        def cancelled(user_message: str):
+            raise KeyboardInterrupt
+
+        chat._stream_response = cancelled
+        with patch("llamamind_ai.app.Prompt.ask", side_effect=["hello", "/quit"]):
+            chat.run()
+        self.assertIn("Response cancelled.", chat.console.file.getvalue())
+        self.assertEqual(chat.history, [])
 
 
 if __name__ == "__main__":
