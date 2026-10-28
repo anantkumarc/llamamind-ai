@@ -78,6 +78,7 @@ class LlamaMindChatTests(unittest.TestCase):
         self.assertNotIn("frequency_penalty", request)
         self.assertNotIn("presence_penalty", request)
         self.assertNotIn("reasoning_effort", request)
+        self.assertNotIn("tools", request)
         self.assertTrue(request["stream"])
         live_options = live_class.call_args.kwargs
         self.assertEqual(live_options["vertical_overflow"], "crop")
@@ -89,13 +90,49 @@ class LlamaMindChatTests(unittest.TestCase):
             "content": "Which is more portable?",
         })
 
-    def test_gpt_oss_models_get_reasoning_effort(self):
+    def test_gpt_oss_models_enable_browser_search_by_default(self):
         chat = self.make_chat(chunks=[chunk("ok")])
         chat.model_name = "openai/gpt-oss-120b"
         with patch("llamamind_ai.app.Live"):
             chat._stream_response("hi")
         request = chat.client.chat.completions.calls[0]
+        self.assertEqual(request["tools"], [{"type": "browser_search"}])
+        self.assertEqual(request["reasoning_effort"], "low")
+
+    def test_disabled_web_search_uses_medium_reasoning_without_tools(self):
+        chat = self.make_chat(chunks=[chunk("ok")])
+        chat.model_name = "openai/gpt-oss-120b"
+        chat.web_search = False
+        with patch("llamamind_ai.app.Live"):
+            chat._stream_response("hi")
+        request = chat.client.chat.completions.calls[0]
+        self.assertNotIn("tools", request)
         self.assertEqual(request["reasoning_effort"], "medium")
+
+    def test_web_commands_toggle_search_and_report_unsupported_models(self):
+        chat = self.make_chat()
+        chat.model_name = "openai/gpt-oss-120b"
+        with patch(
+            "llamamind_ai.app.Prompt.ask",
+            side_effect=["/web off", "/web", "/web on", "/web maybe", "/quit"],
+        ):
+            chat.run()
+
+        output = chat.console.file.getvalue()
+        self.assertIn("Web search: off", output)
+        self.assertIn("Usage: /web", output)
+        self.assertTrue(chat.web_search)
+
+        unsupported_chat = self.make_chat()
+        with patch(
+            "llamamind_ai.app.Prompt.ask",
+            side_effect=["/web on", "/quit"],
+        ):
+            unsupported_chat.run()
+        self.assertIn(
+            "Web search needs a GPT-OSS model",
+            unsupported_chat.console.file.getvalue(),
+        )
 
     def test_history_is_trimmed_to_last_twelve_messages(self):
         chat = self.make_chat(chunks=[chunk("Next answer")])

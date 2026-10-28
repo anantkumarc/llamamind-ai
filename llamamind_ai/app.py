@@ -24,6 +24,7 @@ Response rules:
 - Do not invent facts, files, APIs, commands, or outcomes. State uncertainty explicitly and use qualifiers only when uncertainty is real. Never claim an uncertain fix has been verified.
 - Do not expose secrets or API keys. Warn before destructive actions or meaningful security risks.
 - Provide concise explanations and conclusions, not hidden reasoning or internal chain-of-thought.
+- Web search: when you use live web results, say so briefly and name the sites you relied on, because the app does not show citations separately. If results are missing or conflicting, say that instead of guessing.
 - Follow user formatting requirements unless they conflict with these rules.
 
 Default answer shape (adapt it; skip sections that add nothing):
@@ -39,6 +40,7 @@ MAX_PANEL_WIDTH = 100
 COMMANDS = [
     ("/help", "Show this list of commands"),
     ("/model", "Show the model in use"),
+    ("/web", "Turn live web search on or off (/web on, /web off)"),
     ("/clear", "Clear the screen and start a fresh conversation"),
     ("/exit", "Quit (Ctrl+C also works)"),
 ]
@@ -50,8 +52,40 @@ class LlamaMindChat:
         self.model_name = model_name
         self.console = Console()
         self.history: list[dict[str, str]] = []
+        self.web_search = True
 
     # ---- request -----------------------------------------------------
+
+    def _web_supported(self) -> bool:
+        return "gpt-oss" in self.model_name.lower()
+
+    def _web_enabled(self) -> bool:
+        return self.web_search and self._web_supported()
+
+    def _web_status_text(self) -> str:
+        if not self._web_supported():
+            return "unavailable (needs a GPT-OSS model)"
+        return "on" if self._web_enabled() else "off"
+
+    def _handle_web_command(self, argument: str) -> None:
+        if not self._web_supported():
+            self.console.print(
+                "Web search needs a GPT-OSS model. Set GROQ_MODEL=openai/gpt-oss-120b.",
+                style="yellow",
+            )
+        elif argument in {"on", "off"}:
+            self.web_search = argument == "on"
+            self.console.print(
+                f"Web search: {self._web_status_text()}", style="bold green"
+            )
+        elif argument == "":
+            self.web_search = not self.web_search
+            self.console.print(
+                f"Web search: {self._web_status_text()}", style="bold green"
+            )
+        else:
+            self.console.print("Usage: /web, /web on, or /web off", style="yellow")
+        self.console.print()
 
     def _build_messages(self, user_message: str) -> list[dict[str, str]]:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -62,9 +96,12 @@ class LlamaMindChat:
 
     def _generation_options(self) -> dict:
         options: dict = {"temperature": 0.3, "max_tokens": 2048}
-        # Only GPT-OSS models accept reasoning_effort; other models reject it.
-        if "gpt-oss" in self.model_name.lower():
-            options["reasoning_effort"] = "medium"
+        if self._web_supported():
+            if self._web_enabled():
+                options["tools"] = [{"type": "browser_search"}]
+                options["reasoning_effort"] = "low"
+            else:
+                options["reasoning_effort"] = "medium"
         return options
 
     # ---- rendering ---------------------------------------------------
@@ -94,6 +131,7 @@ class LlamaMindChat:
             Text("Cloud-powered terminal assistant", style="dim"),
             Text(),
             Text.assemble(("Model  ", "dim"), (self.model_name, "green")),
+            Text.assemble(("Web    ", "dim"), (self._web_status_text(), "green")),
             Text.assemble(
                 ("Tips   ", "dim"),
                 ("/help", "bold"),
@@ -144,7 +182,8 @@ class LlamaMindChat:
         )
 
         full_text: list[str] = []
-        status = self.console.status("[cyan]Thinking...[/cyan]", spinner="dots")
+        label = "Searching the web..." if self._web_enabled() else "Thinking..."
+        status = self.console.status(f"[cyan]{label}[/cyan]", spinner="dots")
         status.start()
         live = None
         try:
@@ -208,7 +247,13 @@ class LlamaMindChat:
                 continue
             if command == "/model":
                 self.console.print(f"Using model: {self.model_name}", style="bold green")
+                self.console.print(
+                    f"Web search: {self._web_status_text()}", style="green"
+                )
                 self.console.print()
+                continue
+            if command == "/web" or command.startswith("/web "):
+                self._handle_web_command(command[len("/web"):].strip())
                 continue
             if command == "/clear":
                 self.history = []
